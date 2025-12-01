@@ -48,6 +48,7 @@ public class TimeDeal extends AuditingFields {
     }
 
     public boolean isActive() {
-        return (LocalDateTime.now().isAfter(startTime) && LocalDateTime.now().isBefore(endTime));
+        LocalDateTime now = LocalDateTime.now();
+        return (now.isAfter(startTime) || now.isEqual(startTime)) && now.isBefore(endTime);
     }
 }

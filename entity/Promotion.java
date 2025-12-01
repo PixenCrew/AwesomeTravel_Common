@@ -14,6 +14,8 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+import jakarta.persistence.Column;
+
 @Entity
 @Getter
 @Setter
@@ -26,7 +28,9 @@ public class Promotion {
 
     private String title; // 제목
     private String description; // 텍스트 설명
+    @Column(length = 1000)
     private String thumnailImg; // 대표이미지
+    @Column(length = 1000)
     private String contentImg; // 상세페이지 이미지
 
     @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME)
