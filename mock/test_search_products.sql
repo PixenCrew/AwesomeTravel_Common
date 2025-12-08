@@ -54,37 +54,25 @@ INSERT IGNORE INTO schedule (id, tour_id, day) VALUES
     (19116, 9102, 5);  -- 6일차: 귀국
 
 -- 3. 일정별 Location (항공/호텔/포인트)
--- 기존 Location 데이터의 schedule_id 업데이트
-UPDATE location SET schedule_id = 19101 WHERE id = 29101;
-UPDATE location SET schedule_id = 19102 WHERE id = 29102;
-UPDATE location SET schedule_id = 19103 WHERE id = 29103;
-UPDATE location SET schedule_id = 19104 WHERE id = 29104;
-UPDATE location SET schedule_id = 19105 WHERE id = 29105;
-UPDATE location SET schedule_id = 19111 WHERE id = 29111;
-UPDATE location SET schedule_id = 19112 WHERE id = 29112;
-UPDATE location SET schedule_id = 19113 WHERE id = 29113;
-UPDATE location SET schedule_id = 19114 WHERE id = 29114;
-UPDATE location SET schedule_id = 19115 WHERE id = 29115;
-UPDATE location SET schedule_id = 19116 WHERE id = 29116;
-
--- 새 Location 데이터 삽입 (없는 경우에만)
-INSERT IGNORE INTO location
+-- REPLACE INTO 사용: 기존 레코드가 있으면 삭제하고 새로 삽입
+-- city_code는 외래키 제약 조건 때문에 NULL로 설정 (필요시 나중에 추가 가능)
+REPLACE INTO location
     (locations_order, id, schedule_id, location_type, name, description,
      city_code, depart_airport, arrive_airport, hotel_id)
 VALUES
     -- 런던 패키지 5일
-    (1, 29101, 19101, 'AIR',   'ICN → CDG 출국',  '인천-파리 직항', 'SEL', 'ICN', 'CDG', NULL),
-    (1, 29102, 19102, 'HOTEL', '파리 호텔 체크인', '시내 4성급 호텔', 'CDG', NULL, NULL, 19001),
-    (1, 29103, 19103, 'POINT', '런던 시내 투어',   '버킹엄 궁·템즈강 전망', 'LON', NULL, NULL, NULL),
-    (1, 29104, 19104, 'POINT', '자유일정',        '자유롭게 런던 탐방', 'LON', NULL, NULL, NULL),
-    (1, 29105, 19105, 'AIR',   'CDG → ICN 귀국',  '파리-인천 직항', 'CDG', 'CDG', 'ICN', NULL),
+    (1, 29101, 19101, 'AIR',   'ICN → CDG 출국',  '인천-파리 직항', NULL, 'ICN', 'CDG', NULL),
+    (1, 29102, 19102, 'HOTEL', '파리 호텔 체크인', '시내 4성급 호텔', NULL, NULL, NULL, 19001),
+    (1, 29103, 19103, 'POINT', '런던 시내 투어',   '버킹엄 궁·템즈강 전망', NULL, NULL, NULL, NULL),
+    (1, 29104, 19104, 'POINT', '자유일정',        '자유롭게 런던 탐방', NULL, NULL, NULL, NULL),
+    (1, 29105, 19105, 'AIR',   'CDG → ICN 귀국',  '파리-인천 직항', NULL, 'CDG', 'ICN', NULL),
     -- 방콕 리조트 6일
-    (1, 29111, 19111, 'AIR',   'ICN → BKK 출국',  '인천-방콕 직항', 'SEL', 'ICN', 'BKK', NULL),
-    (1, 29112, 19112, 'HOTEL', '리버 리조트 체크인', '리버뷰 룸 + 조식 포함', 'BKK', NULL, NULL, 19002),
-    (1, 29113, 19113, 'POINT', '방콕 시티투어',    '차오프라야 크루즈 포함', 'BKK', NULL, NULL, NULL),
-    (1, 29114, 19114, 'POINT', '자유일정',        '자유롭게 방콕 탐방', 'BKK', NULL, NULL, NULL),
-    (1, 29115, 19115, 'POINT', '자유일정',        '자유롭게 방콕 탐방', 'BKK', NULL, NULL, NULL),
-    (1, 29116, 19116, 'AIR',   'BKK → ICN 귀국',  '방콕-인천 직항', 'BKK', 'BKK', 'ICN', NULL);
+    (1, 29111, 19111, 'AIR',   'ICN → BKK 출국',  '인천-방콕 직항', NULL, 'ICN', 'BKK', NULL),
+    (1, 29112, 19112, 'HOTEL', '리버 리조트 체크인', '리버뷰 룸 + 조식 포함', NULL, NULL, NULL, 19002),
+    (1, 29113, 19113, 'POINT', '방콕 시티투어',    '차오프라야 크루즈 포함', NULL, NULL, NULL, NULL),
+    (1, 29114, 19114, 'POINT', '자유일정',        '자유롭게 방콕 탐방', NULL, NULL, NULL, NULL),
+    (1, 29115, 19115, 'POINT', '자유일정',        '자유롭게 방콕 탐방', NULL, NULL, NULL, NULL),
+    (1, 29116, 19116, 'AIR',   'BKK → ICN 귀국',  '방콕-인천 직항', NULL, 'BKK', 'ICN', NULL);
 
 -- 4. 항공편 & 좌석 (100일 범위 내 여러 날짜 추가)
 INSERT IGNORE INTO air
@@ -134,6 +122,9 @@ VALUES
              '2025-11-28 00:00:00', 'mock', '2025-11-28 00:00:00', 'mock', 280),
     (41009, 'AT912', 'SQ', 'ICN', '2025-12-22 08:40:00',
              'BKK', '2025-12-22 13:20:00', 0, 'ACTIVE', 'DIRECT',
+             '2025-11-28 00:00:00', 'mock', '2025-11-28 00:00:00', 'mock', 280),
+    (41028, 'AT932', 'SQ', 'ICN', '2025-12-22 14:20:00',
+             'BKK', '2025-12-22 19:00:00', 0, 'ACTIVE', 'DIRECT',
              '2025-11-28 00:00:00', 'mock', '2025-11-28 00:00:00', 'mock', 280),
     (41010, 'AT913', 'SQ', 'ICN', '2025-12-30 08:40:00',
              'BKK', '2025-12-30 13:20:00', 0, 'ACTIVE', 'DIRECT',
@@ -192,6 +183,7 @@ VALUES
     (51020, 41020, 'ECONOMY',  680000,  520000, 200000, 45, 45),
     (51021, 41021, 'ECONOMY',  685000,  525000, 205000, 45, 45),
     (51009, 41009, 'ECONOMY',  690000,  530000, 210000, 45, 45),
+    (51028, 41028, 'ECONOMY',  720000,  550000, 220000, 45, 45),
     (51010, 41010, 'ECONOMY',  670000,  510000, 190000, 45, 45),
     (51013, 41013, 'ECONOMY',  690000,  530000, 210000, 45, 45),
     (51014, 41014, 'ECONOMY',  680000,  520000, 200000, 45, 45),

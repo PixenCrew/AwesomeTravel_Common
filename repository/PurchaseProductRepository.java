@@ -1,6 +1,5 @@
 package renewal.common.repository;
 
-import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 
@@ -21,16 +20,21 @@ public interface PurchaseProductRepository extends JpaRepository<PurchaseProduct
   Optional<PurchaseProduct> findByIdWithAll(@Param("id") Long id);
 
   List<PurchaseProduct> findByUserId(Long userid);
+  
+  @Query("SELECT p FROM PurchaseProduct p WHERE p.product = :product")
+  List<PurchaseProduct> findByProduct(@Param("product") Product product);
 
   @Query("""
        SELECT p
        FROM PurchaseProduct p
        WHERE p.product = :product
-         AND DATE(p.departDateTime) = :departDate
+         AND p.departDateTime >= :departDateStart
+         AND p.departDateTime < :departDateEnd
        ORDER BY p.purchaseDate ASC
       """)
   List<PurchaseProduct> findByProductAndDepartDate(
       @Param("product") Product product,
-      @Param("departDate") LocalDate departDate);
+      @Param("departDateStart") java.time.LocalDateTime departDateStart,
+      @Param("departDateEnd") java.time.LocalDateTime departDateEnd);
 
 }
