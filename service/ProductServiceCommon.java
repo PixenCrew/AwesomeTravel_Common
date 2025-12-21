@@ -51,6 +51,14 @@ public class ProductServiceCommon {
         Long finalPriceAdult = tour.getPriceAdult();
         Long finalPriceYouth = tour.getPriceYouth();
         Long finalPriceInfant = tour.getPriceInfant();
+        
+        // 가격 구성 추적용 변수
+        Long tourPrice = tour.getPriceAdult();
+        Long totalAirPrice = 0L;
+        Long totalHotelPrice = 0L;
+        
+        // 각 항공편 정보 저장용 리스트
+        java.util.List<String> airDetails = new java.util.ArrayList<>();
 
         List<Schedule> schedules = tour.getSchedules();
 
@@ -115,9 +123,9 @@ public class ProductServiceCommon {
                     // System.out.println(departAirport.getAirportCode());
                     // System.out.println(arriveAirport.getAirportCode());
                     // System.out.println(product.getSeatClassTypes());
-                    // 첫 번째 날(day 0)이고 특정 SeatClass가 지정된 경우 해당 SeatClass 사용
+                    // 이미 SeatClass가 지정된 경우 해당 SeatClass 사용 (모든 Schedule에 대해)
                     SeatClass finalSeat = null;
-                    if (sced.getDay() == 0 && loc.getSeatClass() != null) {
+                    if (loc.getSeatClass() != null) {
                         // 특정 SeatClass가 이미 지정된 경우 (여러 항공편 처리용)
                         finalSeat = loc.getSeatClass();
                     } else {
@@ -155,18 +163,64 @@ public class ProductServiceCommon {
                     // product.setAvailableSeats(finalSeat.getAvailableSeats());
                     // }
 
-                    finalPriceAdult += finalSeat.getPriceAdult();
+                    Long airPrice = finalSeat.getPriceAdult();
+                    finalPriceAdult += airPrice;
+                    totalAirPrice += airPrice;
                     finalPriceYouth += finalSeat.getPriceYouth();
                     finalPriceInfant += finalSeat.getPriceInfant();
+                    
+                    // 항공편 정보 저장
+                    String airInfo = String.format("Day %d: %s -> %s, Price: %d KRW", 
+                        sced.getDay(),
+                        departAirport != null ? departAirport.getAirportCode() : "N/A",
+                        arriveAirport != null ? arriveAirport.getAirportCode() : "N/A",
+                        airPrice);
+                    airDetails.add(airInfo);
+                    
+                    // 항공권 가격 로그
+                    log.debug("[Price Breakdown] Air added - Day: {}, Depart: {} -> Arrive: {}, Price: {} KRW, Total Air: {} KRW", 
+                        sced.getDay(),
+                        departAirport != null ? departAirport.getAirportCode() : "N/A",
+                        arriveAirport != null ? arriveAirport.getAirportCode() : "N/A",
+                        airPrice,
+                        totalAirPrice);
 
                 } else if (type == LocationType.HOTEL) {
-                    finalPriceAdult += loc.getHotel().getPrice();
-                    finalPriceYouth += loc.getHotel().getPrice();
+                    Long hotelPrice = loc.getHotel().getPrice();
+                    finalPriceAdult += hotelPrice;
+                    totalHotelPrice += hotelPrice;
+                    finalPriceYouth += hotelPrice;
                     // 영유아는 호텔 포함 안함
+                    
+                    // 호텔 가격 로그
+                    log.debug("[Price Breakdown] Hotel added - Day: {}, Hotel Price: {} KRW, Total Hotel: {} KRW", 
+                        sced.getDay(),
+                        hotelPrice,
+                        totalHotelPrice);
                 }
             }
         }
 
+        // 가격 구성 로그 출력
+        log.info("========== [Price Breakdown Analysis] Product ID: {}, Title: {} ==========", 
+            product.getId(), product.getTitle());
+        log.info("[Price Breakdown] Tour Base Price: {} KRW", tourPrice);
+        
+        // 각 항공편 개별 가격 출력
+        if (!airDetails.isEmpty()) {
+            log.info("[Price Breakdown] Air Details ({} flight(s)):", airDetails.size());
+            for (String airDetail : airDetails) {
+                log.info("  - {}", airDetail);
+            }
+            log.info("[Price Breakdown] Total Air Price: {} KRW", totalAirPrice);
+        } else {
+            log.info("[Price Breakdown] Total Air Price: {} KRW (No flights)", totalAirPrice);
+        }
+        
+        log.info("[Price Breakdown] Total Hotel Price: {} KRW", totalHotelPrice);
+        log.info("[Price Breakdown] Final Price (Before Discount): {} KRW (Tour {} + Air {} + Hotel {})", 
+            finalPriceAdult, tourPrice, totalAirPrice, totalHotelPrice);
+        
         product.setFinalPriceAdult(finalPriceAdult);
         product.setFinalPriceYouth(finalPriceYouth);
         product.setFinalPriceInfant(finalPriceInfant);
@@ -326,16 +380,28 @@ public class ProductServiceCommon {
             timeDeal.setOriginalPriceYouth(finalPriceYouth);
             timeDeal.setOriginalPriceInfant(finalPriceInfant);
 
+            Long beforeDiscount = finalPriceAdult;
             if (timeDeal.getDiscountType() == DiscountType.ABSOLUTE) {
-                product.setFinalPriceAdult(finalPriceAdult - timeDeal.getValue());
-                product.setFinalPriceYouth(finalPriceYouth - timeDeal.getValue());
-                product.setFinalPriceInfant(finalPriceInfant - timeDeal.getValue());
+                Long discountAmount = timeDeal.getValue();
+                product.setFinalPriceAdult(finalPriceAdult - discountAmount);
+                product.setFinalPriceYouth(finalPriceYouth - discountAmount);
+                product.setFinalPriceInfant(finalPriceInfant - discountAmount);
+                log.info("[Price Breakdown] TimeDeal Discount Applied (Absolute) - Original: {} KRW, Discount: {} KRW, Final: {} KRW", 
+                    beforeDiscount, discountAmount, product.getFinalPriceAdult());
             } else {
-                product.setFinalPriceAdult(finalPriceAdult * (100 - timeDeal.getValue()) / 100);
-                product.setFinalPriceYouth(finalPriceYouth * (100 - timeDeal.getValue()) / 100);
-                product.setFinalPriceInfant(finalPriceInfant * (100 - timeDeal.getValue()) / 100);
+                Long discountPercent = timeDeal.getValue();
+                Long afterDiscount = finalPriceAdult * (100 - discountPercent) / 100;
+                product.setFinalPriceAdult(afterDiscount);
+                product.setFinalPriceYouth(finalPriceYouth * (100 - discountPercent) / 100);
+                product.setFinalPriceInfant(finalPriceInfant * (100 - discountPercent) / 100);
+                log.info("[Price Breakdown] TimeDeal Discount Applied (Percentage) - Original: {} KRW, Discount: {}%, Final: {} KRW", 
+                    beforeDiscount, discountPercent, product.getFinalPriceAdult());
             }
+        } else {
+            log.info("[Price Breakdown] No TimeDeal - Final Price: {} KRW", finalPriceAdult);
         }
+        
+        log.info("========== [Price Breakdown Analysis Complete] Final Price: {} KRW ==========", product.getFinalPriceAdult());
 
         return product;
     }
