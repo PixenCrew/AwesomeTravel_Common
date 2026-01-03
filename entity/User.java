@@ -94,7 +94,7 @@ public class User extends AuditingFields {
     // private List<PurchaseProduct> productPurchases = new ArrayList<>();
 
     @Enumerated(EnumType.STRING)
-    private MemberGrade grade;
+    private MemberGrade grade = MemberGrade.BASIC;
 
     // 최근 본 상품
     @Builder.Default
