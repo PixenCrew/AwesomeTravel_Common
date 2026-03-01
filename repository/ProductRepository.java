@@ -22,6 +22,7 @@ public interface ProductRepository extends JpaRepository<Product, Long>, JpaSpec
           SELECT p
           FROM Product p
           WHERE p.timeDeal IS NOT NULL
+            AND (p.isActive IS NULL OR p.isActive = true)
             AND p.timeDeal.startTime <= CURRENT_TIMESTAMP
             AND p.timeDeal.endTime   >= CURRENT_TIMESTAMP
           ORDER BY p.timeDeal.endTime ASC
@@ -33,5 +34,8 @@ public interface ProductRepository extends JpaRepository<Product, Long>, JpaSpec
   // 최근 등록 상품 조회 (비로그인 사용자용)
   @Query("SELECT p FROM Product p ORDER BY p.id DESC")
   List<Product> findRecentProducts(org.springframework.data.domain.Pageable pageable);
+
+  /** cutoffDays가 설정된 상품 목록 (마감일/홀드 반납 스케줄용) */
+  List<Product> findByCutoffDaysIsNotNull();
 
 }
