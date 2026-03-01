@@ -221,39 +221,34 @@ public class Product extends AuditingFields implements Cloneable {
         FINISHED
     }
 
-    // Review 통계 메서드
+    private static long nvl(Long v) {
+        return v != null ? v : 0L;
+    }
+
+    // Review 통계 메서드 (DB에 star1~star5가 null일 수 있음)
     public Long getTotalReviews() {
-        return star1 + star2 + star3 + star4 + star5;
+        return nvl(star1) + nvl(star2) + nvl(star3) + nvl(star4) + nvl(star5);
     }
 
     public Double getAverageRating() {
-        Long total = getTotalReviews();
+        long total = getTotalReviews();
         if (total == 0)
             return 0.0;
-        return (star1 * 1.0 + star2 * 2.0 + star3 * 3.0 + star4 * 4.0 + star5 * 5.0) / total;
+        return (nvl(star1) * 1.0 + nvl(star2) * 2.0 + nvl(star3) * 3.0 + nvl(star4) * 4.0 + nvl(star5) * 5.0) / total;
     }
 
     public Double getStarPercentage(int starNumber) {
-        Long total = getTotalReviews();
+        long total = getTotalReviews();
         if (total == 0)
             return 0.0;
-        Long count = 0L;
+        long count;
         switch (starNumber) {
-            case 1:
-                count = star1;
-                break;
-            case 2:
-                count = star2;
-                break;
-            case 3:
-                count = star3;
-                break;
-            case 4:
-                count = star4;
-                break;
-            case 5:
-                count = star5;
-                break;
+            case 1: count = nvl(star1); break;
+            case 2: count = nvl(star2); break;
+            case 3: count = nvl(star3); break;
+            case 4: count = nvl(star4); break;
+            case 5: count = nvl(star5); break;
+            default: count = 0L;
         }
         return (count * 100.0) / total;
     }
