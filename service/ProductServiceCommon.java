@@ -2,7 +2,13 @@ package renewal.common.service;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 
 import org.hibernate.Hibernate;
 import org.slf4j.Logger;
@@ -14,9 +20,10 @@ import lombok.RequiredArgsConstructor;
 import renewal.common.entity.AirportCode;
 import renewal.common.entity.Location;
 import renewal.common.entity.Location.LocationType;
+import renewal.common.entity.PackageSeatHold;
 import renewal.common.entity.Product;
-import renewal.common.entity.Product.DepartTimeType;
 import renewal.common.entity.Product.ProductStatus;
+import renewal.common.entity.PurchaseBase.ConfirmedSeatClass;
 import renewal.common.entity.PurchaseBase.PurchaseStatus;
 import renewal.common.entity.PurchaseProduct;
 import renewal.common.entity.Refund;
@@ -25,6 +32,7 @@ import renewal.common.entity.SeatClass;
 import renewal.common.entity.TimeDeal;
 import renewal.common.entity.TimeDeal.DiscountType;
 import renewal.common.entity.Tour;
+import renewal.common.repository.PackageSeatHoldRepository;
 import renewal.common.repository.ProductRepository;
 import renewal.common.repository.PurchaseProductRepository;
 import renewal.common.repository.RefundRepository;
@@ -40,8 +48,189 @@ public class ProductServiceCommon {
     private final PurchaseProductRepository purchaseProductRepo;
     private final SeatClassRepository seatClassRepo;
     private final RefundRepository refundRepo;
+    private final PackageSeatHoldRepository packageSeatHoldRepo;
     private final EmailService emailService;
 
+    /**
+     * 옵션별로 서로 다른 Tour/Location을 쓰기 위해 Tour(및 Schedules, Locations)를 복사한다.
+     * 복사본은 영속화하지 않고 계산용으로만 사용한다. Location은 새 인스턴스로 복사하므로
+     * 각 복사본에 setSeatClass를 호출해도 다른 복사본에 영향을 주지 않는다.
+     *
+     * @param source 원본 Tour (null이면 null 반환)
+     * @return 복사된 Tour, 또는 null
+     */
+    public Tour copyTourForOption(Tour source) {
+        if (source == null) {
+            return null;
+        }
+        Hibernate.initialize(source.getSchedules());
+        if (source.getSchedules() == null) {
+            Tour copy = new Tour();
+            copy.setCompany(source.getCompany());
+            copy.setName(source.getName());
+            copy.setCountry(source.getCountry());
+            copy.setMaxCapacity(source.getMaxCapacity());
+            copy.setMinCapacity(source.getMinCapacity());
+            copy.setStartDate(source.getStartDate());
+            copy.setEndDate(source.getEndDate());
+            copy.setPriceAdult(source.getPriceAdult());
+            copy.setPriceYouth(source.getPriceYouth());
+            copy.setPriceInfant(source.getPriceInfant());
+            copy.setHotelPriceSum(source.getHotelPriceSum());
+            if (source.getKeywords() != null) {
+                copy.setKeywords(new HashSet<>(source.getKeywords()));
+            }
+            copy.setSchedules(new ArrayList<>());
+            return copy;
+        }
+        Tour copy = new Tour();
+        copy.setCompany(source.getCompany());
+        copy.setName(source.getName());
+        copy.setCountry(source.getCountry());
+        copy.setMaxCapacity(source.getMaxCapacity());
+        copy.setMinCapacity(source.getMinCapacity());
+        copy.setStartDate(source.getStartDate());
+        copy.setEndDate(source.getEndDate());
+        copy.setPriceAdult(source.getPriceAdult());
+        copy.setPriceYouth(source.getPriceYouth());
+        copy.setPriceInfant(source.getPriceInfant());
+        copy.setHotelPriceSum(source.getHotelPriceSum());
+        if (source.getKeywords() != null) {
+            copy.setKeywords(new HashSet<>(source.getKeywords()));
+        }
+        List<Schedule> copySchedules = new ArrayList<>();
+        for (Schedule srcSchedule : source.getSchedules()) {
+            if (srcSchedule == null) continue;
+            Hibernate.initialize(srcSchedule.getLocations());
+            Schedule copySchedule = new Schedule();
+            copySchedule.setTour(copy);
+            copySchedule.setDay(srcSchedule.getDay());
+            List<Location> copyLocations = new ArrayList<>();
+            if (srcSchedule.getLocations() != null) {
+                for (Location srcLoc : srcSchedule.getLocations()) {
+                    if (srcLoc == null) continue;
+                    Location copyLoc = new Location();
+                    copyLoc.setSchedule(copySchedule);
+                    copyLoc.setLocationType(srcLoc.getLocationType());
+                    copyLoc.setName(srcLoc.getName());
+                    copyLoc.setDescription(srcLoc.getDescription());
+                    copyLoc.setCityCode(srcLoc.getCityCode());
+                    copyLoc.setDepartAirport(srcLoc.getDepartAirport());
+                    copyLoc.setArriveAirport(srcLoc.getArriveAirport());
+                    copyLoc.setHotel(srcLoc.getHotel());
+                    copyLocations.add(copyLoc);
+                }
+            }
+            copySchedule.setLocations(copyLocations);
+            copySchedules.add(copySchedule);
+        }
+        copy.setSchedules(copySchedules);
+        return copy;
+    }
+
+    /**
+     * 🔧 리스트용: 모든 SeatClass에 대해 Product를 복제 생성
+     * 각 SeatClass마다 Product를 하나씩 생성하여 반환
+     * 
+     * @param baseProduct 기본 Product (복제 원본)
+     * @param departDate 출발 날짜
+     * @param schedule Schedule (항공편이 있는 Schedule)
+     * @param location Location (AIR 타입의 Location)
+     * @param startDateTime 조회 시작 시간
+     * @param endDateTime 조회 종료 시간
+     * @param departAirport 출발 공항
+     * @param arriveAirport 도착 공항
+     * @param seatClassTypes 허용된 좌석 등급 타입들
+     * @return 각 SeatClass에 대한 Product 리스트
+     */
+    public List<Product> buildProductsForDate(
+            Product baseProduct,
+            LocalDate departDate,
+            Schedule schedule,
+            Location location,
+            LocalDateTime startDateTime,
+            LocalDateTime endDateTime,
+            AirportCode departAirport,
+            AirportCode arriveAirport,
+            Set<SeatClass.SeatClassType> seatClassTypes) {
+        
+        List<Product> result = new ArrayList<>();
+        
+        // 모든 SeatClass 조회 (가격순 정렬)
+        List<SeatClass> seats = seatClassRepo.findLowestPriceSeatsByAirportCodes(
+                startDateTime,
+                endDateTime,
+                departAirport.getAirportCode(),
+                arriveAirport.getAirportCode(),
+                seatClassTypes);
+        
+        if (seats == null || seats.isEmpty()) {
+            return result;
+        }
+        
+        // 🔧 핵심: SeatClass를 그룹핑하여 (airId + seatClassType) 기준으로 최저가만 유지
+        Map<String, SeatClass> grouped = new java.util.HashMap<>();
+        for (SeatClass seat : seats) {
+            if (seat.getAir() != null && seat.getAir().getId() != null && seat.getClassType() != null) {
+                String key = seat.getAir().getId() + "_" + seat.getClassType().name();
+                
+                // 같은 항공 + 같은 좌석등급이면 "최저가"만 유지
+                if (!grouped.containsKey(key) 
+                    || (seat.getPriceAdult() != null && grouped.get(key).getPriceAdult() != null
+                        && seat.getPriceAdult() < grouped.get(key).getPriceAdult())) {
+                    grouped.put(key, seat);
+                }
+            }
+        }
+        
+        // 🔧 그룹핑된 SeatClass만 사용하여 Product 생성
+        for (SeatClass seat : grouped.values()) {
+            try {
+                // Product 복제
+                Product cloned = (Product) baseProduct.clone();
+                // 옵션별로 서로 다른 Tour/Location을 쓰기 위해 Tour 복사본 사용
+                Tour tourCopy = copyTourForOption(baseProduct.getTour());
+                cloned.setTour(tourCopy != null ? tourCopy : cloned.getTour());
+
+                // Tour 및 Schedule 초기화 (복사본 기준)
+                if (cloned.getTour() != null) {
+                    if (cloned.getTour().getSchedules() != null) {
+                        // 해당 Schedule 찾기
+                        for (Schedule clonedSchedule : cloned.getTour().getSchedules()) {
+                            if (clonedSchedule != null && Objects.equals(clonedSchedule.getDay(), schedule.getDay())) {
+                                Hibernate.initialize(clonedSchedule.getLocations());
+                                if (clonedSchedule.getLocations() != null) {
+                                    // 해당 Location 찾아서 SeatClass 설정
+                                    for (Location clonedLocation : clonedSchedule.getLocations()) {
+                                        if (clonedLocation != null 
+                                            && clonedLocation.getLocationType() == Location.LocationType.AIR
+                                            && clonedLocation.getDepartAirport() != null
+                                            && clonedLocation.getArriveAirport() != null
+                                            && clonedLocation.getDepartAirport().getAirportCode().equals(departAirport.getAirportCode())
+                                            && clonedLocation.getArriveAirport().getAirportCode().equals(arriveAirport.getAirportCode())) {
+                                            clonedLocation.setSeatClass(seat);
+                                            break;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // 가격 계산
+                Product calcProduct = calcSingleProduct(cloned, departDate);
+                if (calcProduct != null && calcProduct.getFinalPriceAdult() != null) {
+                    result.add(calcProduct);
+                }
+            } catch (CloneNotSupportedException e) {
+                log.error("Product clone failed for seat class: {}", seat.getId(), e);
+            }
+        }
+        
+        return result;
+    }
 
     public Product calcSingleProduct(Product product, LocalDate departDate) {
         Hibernate.initialize(product.getTour());
@@ -95,9 +284,9 @@ public class ProductServiceCommon {
                     // departDate = departDate.plusDays(sced.getDay());
 
                     LocalDate currentdepartDate = departDate.plusDays(sced.getDay());
-                    DepartTimeType dtt = product.getDepartTimeType();
-                    int startHour = sced.getDay() == 0 ? dtt.getStartHour() : 0;
-                    int endHour = sced.getDay() == 0 ? dtt.getEndHour() : 23;
+                    // departTimeType은 선택 필터로 완화: 조회 시에는 하루 전체(00:00~23:59) 항공편 조회
+                    int startHour = 0;
+                    int endHour = 23;
 
                     LocalDateTime startDateTime = currentdepartDate.atTime(startHour, 0);
                     LocalDateTime endDateTime = currentdepartDate.atTime(endHour, 59, 59);
@@ -123,13 +312,19 @@ public class ProductServiceCommon {
                     // System.out.println(departAirport.getAirportCode());
                     // System.out.println(arriveAirport.getAirportCode());
                     // System.out.println(product.getSeatClassTypes());
-                    // 이미 SeatClass가 지정된 경우 해당 SeatClass 사용 (모든 Schedule에 대해)
+                    // 🔧 핵심 수정: SeatClass가 이미 설정되어 있으면 그것을 사용 (리스트용/달력용 모두)
+                    // SeatClass가 없을 때만 findLowestPriceSeat() 호출 (일반 목록 화면용)
                     SeatClass finalSeat = null;
-                    if (loc.getSeatClass() != null) {
-                        // 특정 SeatClass가 이미 지정된 경우 (여러 항공편 처리용)
+                    boolean isSeatClassPreSet = loc.getSeatClass() != null; // SeatClass가 이미 설정되어 있는지 확인
+                    
+                    if (isSeatClassPreSet) {
+                        // 🔧 리스트용/달력용: 이미 설정된 SeatClass 사용
+                        // ProductController에서 모든 SeatClass 조합을 생성한 경우
+                        // 또는 달력 페이지에서 특정 SeatClass를 설정한 경우
                         finalSeat = loc.getSeatClass();
                     } else {
-                        // 일반적인 경우: 가장 저렴한 항공편 찾기
+                        // 🔧 일반 목록 화면용: 가장 저렴한 항공편 찾기
+                        // 이 경우는 ProductController의 findMultipleProductsForDate()를 거치지 않은 경우
                         finalSeat = seatClassRepo.findLowestPriceSeat(
                                 startDateTime,
                                 endDateTime,
@@ -138,23 +333,35 @@ public class ProductServiceCommon {
                                 product.getSeatClassTypes());
                     }
 
-                    // 항공권 없으면 null 반환
+                    // 🔧 항공권 없으면 해당 Location만 건너뛰고 계속 진행 (전체 Product를 null로 반환하지 않음)
                     if (finalSeat == null) {
-                        return null;
+                        log.warn("[Price Calculation] SeatClass not found for Location - Day: {}, Depart: {} -> Arrive: {}", 
+                            sced.getDay(),
+                            departAirport != null ? departAirport.getAirportCode() : "N/A",
+                            arriveAirport != null ? arriveAirport.getAirportCode() : "N/A");
+                        continue; // 해당 Location만 건너뛰고 다음 Location 처리
                     }
 
-                    if (product.getAirline() == null) {
-                        product.setAirline(finalSeat.getAir().getAirline());
-                    }
-
+                    // 🔥 핵심 수정: 실제 계산에 사용된 SeatClass를 Location에 설정 (breakdown 일치를 위해)
+                    // 이렇게 하면 ProductDetailDto의 breakdown이 실제 계산 가격과 일치함
                     loc.setSeatClass(finalSeat);
 
-                    if (product.getDepartDateTime() == null) { // 첫 항공권 출발시간 (=출국시간)
-                        product.setDepartDateTime(finalSeat.getAir().getDepartDateTime());
-                    }
+                    // 🔧 SeatClass가 이미 설정된 경우에는 추가 엔티티 변경하지 않음 (리스트용/달력용)
+                    // SeatClass가 설정되지 않은 경우에만 추가 엔티티 변경 (일반 목록 화면용)
+                    if (!isSeatClassPreSet) {
+                        // 일반 목록 화면용: 엔티티에 항공편 정보 설정
+                        if (product.getAirline() == null) {
+                            product.setAirline(finalSeat.getAir().getAirline());
+                        }
 
-                    // 한 product에 대해 항공권 도착시간 계속 덮어씌움 => 마지막 항공권의 도착시간 (=귀국시간)
-                    product.setReturnDateTime(finalSeat.getAir().getArriveDateTime());
+                        if (product.getDepartDateTime() == null) { // 첫 항공권 출발시간 (=출국시간)
+                            product.setDepartDateTime(finalSeat.getAir().getDepartDateTime());
+                        }
+
+                        // 한 product에 대해 항공권 도착시간 계속 덮어씌움 => 마지막 항공권의 도착시간 (=귀국시간)
+                        product.setReturnDateTime(finalSeat.getAir().getArriveDateTime());
+                    }
+                    // 🔧 SeatClass는 항상 설정되었으므로, 이제 가격 계산만 수행
 
                     // 항공권 잔여좌석 확인로직 -> 해당 날짜의 상품 예약자 수 확인로직으로 변경
                     // // 한 product에 대해 항공권 잔여좌석 낮은쪽 계속 덮어씌움 => 예약 가능인 수 저장
@@ -201,7 +408,7 @@ public class ProductServiceCommon {
             }
         }
 
-        // 가격 구성 로그 출력
+        // 가격 구성 로그 출력 (상세 디버깅용)
         log.info("========== [Price Breakdown Analysis] Product ID: {}, Title: {} ==========", 
             product.getId(), product.getTitle());
         log.info("[Price Breakdown] Tour Base Price: {} KRW", tourPrice);
@@ -214,12 +421,19 @@ public class ProductServiceCommon {
             }
             log.info("[Price Breakdown] Total Air Price: {} KRW", totalAirPrice);
         } else {
-            log.info("[Price Breakdown] Total Air Price: {} KRW (No flights)", totalAirPrice);
+            log.warn("[Price Breakdown] ⚠️ 항공편이 없습니다! Total Air Price: {} KRW", totalAirPrice);
         }
         
         log.info("[Price Breakdown] Total Hotel Price: {} KRW", totalHotelPrice);
-        log.info("[Price Breakdown] Final Price (Before Discount): {} KRW (Tour {} + Air {} + Hotel {})", 
-            finalPriceAdult, tourPrice, totalAirPrice, totalHotelPrice);
+        Long calculatedSum = tourPrice + totalAirPrice + totalHotelPrice;
+        log.info("[Price Breakdown] Final Price (Before Discount): {} KRW (Tour {} + Air {} + Hotel {} = {})", 
+            finalPriceAdult, tourPrice, totalAirPrice, totalHotelPrice, calculatedSum);
+        
+        // 🔧 가격 불일치 경고
+        if (!Objects.equals(finalPriceAdult, calculatedSum)) {
+            log.warn("[Price Breakdown] ⚠️ 가격 불일치! FinalPriceAdult: {} != 계산합계: {} (차이: {})", 
+                finalPriceAdult, calculatedSum, finalPriceAdult - calculatedSum);
+        }
         
         product.setFinalPriceAdult(finalPriceAdult);
         product.setFinalPriceYouth(finalPriceYouth);
@@ -258,7 +472,7 @@ public class ProductServiceCommon {
             Long currentAirId = null;
             if (product.getTour() != null && product.getTour().getSchedules() != null) {
                 for (Schedule schedule : product.getTour().getSchedules()) {
-                    if (schedule != null && schedule.getDay() == 0 && schedule.getLocations() != null) {
+                    if (schedule != null && Objects.equals(schedule.getDay(), 0L) && schedule.getLocations() != null) {
                         for (Location location : schedule.getLocations()) {
                             if (location != null && location.getLocationType() == LocationType.AIR 
                                 && location.getSeatClass() != null && location.getSeatClass().getAir() != null) {
@@ -423,6 +637,214 @@ public class ProductServiceCommon {
         refundRepo.save(refund);
     }
 
+    /**
+     * 패키지(출국+귀국 2구간)에 대한 좌석 홀드 조회.
+     * finalSeatClasses가 2개 미만이거나 SeatClass를 찾을 수 없으면 empty.
+     */
+    public Optional<PackageSeatHold> findPackageSeatHold(PurchaseProduct purchaseProduct) {
+        if (purchaseProduct == null || purchaseProduct.getProduct() == null || purchaseProduct.getDepartDateTime() == null) {
+            return Optional.empty();
+        }
+        List<ConfirmedSeatClass> list = purchaseProduct.getFinalSeatClasses();
+        if (list == null || list.size() < 2) {
+            return Optional.empty();
+        }
+        ConfirmedSeatClass out = list.get(0);
+        ConfirmedSeatClass ret = list.get(1);
+        if (out.getAirId() == null || out.getClassType() == null || ret.getAirId() == null || ret.getClassType() == null) {
+            return Optional.empty();
+        }
+        Long outboundId = seatClassRepo.findByAirIdAndClassType(out.getAirId(), out.getClassType()).map(SeatClass::getId).orElse(null);
+        Long returnId = seatClassRepo.findByAirIdAndClassType(ret.getAirId(), ret.getClassType()).map(SeatClass::getId).orElse(null);
+        if (outboundId == null || returnId == null) {
+            return Optional.empty();
+        }
+        return packageSeatHoldRepo.findByProductIdAndDepartDateAndOutboundSeatClassIdAndReturnSeatClassId(
+            purchaseProduct.getProduct().getId(),
+            purchaseProduct.getDepartDateTime().toLocalDate(),
+            outboundId,
+            returnId);
+    }
+
+    /**
+     * 해당 (상품, 출발일, 출국/귀국 SeatClass)에 홀드가 존재하고 풀 여유(totalHeld - allocated > 0)가 있는지 여부.
+     * 상품 노출 조건: 홀드에 풀 여유가 있으면 availableSeats 체크 없이 노출 가능.
+     */
+    public boolean hasHoldWithPoolSpace(Long productId, LocalDate departDate, Long outboundSeatClassId, Long returnSeatClassId) {
+        if (productId == null || departDate == null || outboundSeatClassId == null || returnSeatClassId == null) {
+            return false;
+        }
+        return packageSeatHoldRepo.findByProductIdAndDepartDateAndOutboundSeatClassIdAndReturnSeatClassId(
+                productId, departDate, outboundSeatClassId, returnSeatClassId)
+            .map(h -> (h.getTotalHeld() != null ? h.getTotalHeld() : 0L) - (h.getAllocated() != null ? h.getAllocated() : 0L) > 0)
+            .orElse(false);
+    }
+
+    /**
+     * 첫 예약 시 해당 (상품, 출발일, 출국/귀국 SeatClass)에 대해 홀드가 없으면 생성하고
+     * Tour.maxCapacity만큼 출국/귀국 SeatClass에 reserveSeats 호출.
+     */
+    @Transactional
+    public void ensurePackageSeatHold(PurchaseProduct purchaseProduct) {
+        if (purchaseProduct == null || purchaseProduct.getProduct() == null || purchaseProduct.getDepartDateTime() == null) {
+            return;
+        }
+        Tour tour = purchaseProduct.getProduct().getTour();
+        if (tour == null) {
+            return;
+        }
+        List<ConfirmedSeatClass> list = purchaseProduct.getFinalSeatClasses();
+        if (list == null || list.size() < 2) {
+            return;
+        }
+        ConfirmedSeatClass out = list.get(0);
+        ConfirmedSeatClass ret = list.get(1);
+        if (out.getAirId() == null || out.getClassType() == null || ret.getAirId() == null || ret.getClassType() == null) {
+            return;
+        }
+        SeatClass outboundSc = seatClassRepo.findByAirIdAndClassType(out.getAirId(), out.getClassType()).orElse(null);
+        SeatClass returnSc = seatClassRepo.findByAirIdAndClassType(ret.getAirId(), ret.getClassType()).orElse(null);
+        if (outboundSc == null || returnSc == null) {
+            return;
+        }
+        Long productId = purchaseProduct.getProduct().getId();
+        LocalDate departDate = purchaseProduct.getDepartDateTime().toLocalDate();
+        Long outboundId = outboundSc.getId();
+        Long returnId = returnSc.getId();
+        Optional<PackageSeatHold> existing = packageSeatHoldRepo.findByProductIdAndDepartDateAndOutboundSeatClassIdAndReturnSeatClassId(
+            productId, departDate, outboundId, returnId);
+        if (existing.isPresent()) {
+            return;
+        }
+        Long maxCapacity = tour.getMaxCapacity() != null ? tour.getMaxCapacity() : 0L;
+        if (maxCapacity <= 0) {
+            return;
+        }
+        PackageSeatHold hold = new PackageSeatHold(productId, departDate, outboundId, returnId, maxCapacity);
+        packageSeatHoldRepo.save(hold);
+        try {
+            outboundSc.reserveSeats(maxCapacity);
+            seatClassRepo.save(outboundSc);
+            returnSc.reserveSeats(maxCapacity);
+            seatClassRepo.save(returnSc);
+        } catch (Exception e) {
+            log.warn("패키지 좌석 홀드 확보 실패 productId={} departDate={}: {}", productId, departDate, e.getMessage());
+            throw new RuntimeException("패키지 좌석 홀드 확보 실패: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 결제 확정 시 패키지 홀드가 있으면 해당 인원만 allocated에 더함 (SeatClass는 홀드 시 이미 차감됨).
+     */
+    @Transactional
+    public void allocatePackageSeatHold(PurchaseProduct purchaseProduct) {
+        Optional<PackageSeatHold> holdOpt = findPackageSeatHold(purchaseProduct);
+        if (holdOpt.isEmpty()) {
+            return;
+        }
+        long n = (purchaseProduct.getAdultCount() != null ? purchaseProduct.getAdultCount() : 0L)
+                + (purchaseProduct.getYouthCount() != null ? purchaseProduct.getYouthCount() : 0L);
+        if (n <= 0) {
+            return;
+        }
+        PackageSeatHold hold = holdOpt.get();
+        hold.setAllocated((hold.getAllocated() != null ? hold.getAllocated() : 0L) + n);
+        packageSeatHoldRepo.save(hold);
+    }
+
+    /**
+     * 특정 출발일의 미사용 홀드분을 두 SeatClass에 반납 (마감일 = 출발 N일 전).
+     * 오늘 날짜 기준으로 출발일이 (today + N)인 홀드에 대해 (total_held - allocated)만큼 cancelSeats 후 released_at 설정.
+     */
+    @Transactional
+    public void releaseUnusedSeatsForDepartureDate(LocalDate departDate) {
+        List<PackageSeatHold> holds = packageSeatHoldRepo.findByReleasedAtIsNullAndDepartDate(departDate);
+        for (PackageSeatHold hold : holds) {
+            releaseSingleHold(hold);
+        }
+    }
+
+    /**
+     * 특정 (상품, 출발일)에 대한 미사용 홀드분 반납. 상품별 cutoffDays 기준 마감일 반납 시 사용.
+     */
+    @Transactional
+    public void releaseUnusedSeatsForProductAndDepartDate(Long productId, LocalDate departDate) {
+        if (productId == null || departDate == null) {
+            return;
+        }
+        List<PackageSeatHold> holds = packageSeatHoldRepo.findByReleasedAtIsNullAndProductIdAndDepartDate(productId, departDate);
+        for (PackageSeatHold hold : holds) {
+            releaseSingleHold(hold);
+        }
+    }
+
+    private void releaseSingleHold(PackageSeatHold hold) {
+        long toRelease = (hold.getTotalHeld() != null ? hold.getTotalHeld() : 0L) - (hold.getAllocated() != null ? hold.getAllocated() : 0L);
+        if (toRelease <= 0) {
+            hold.setReleasedAt(LocalDateTime.now());
+            packageSeatHoldRepo.save(hold);
+            return;
+        }
+        seatClassRepo.findById(hold.getOutboundSeatClassId()).ifPresent(sc -> {
+            try {
+                sc.cancelSeats(toRelease);
+                seatClassRepo.save(sc);
+            } catch (Exception e) {
+                log.warn("홀드 반납 실패 outbound holdId={}: {}", hold.getId(), e.getMessage());
+            }
+        });
+        seatClassRepo.findById(hold.getReturnSeatClassId()).ifPresent(sc -> {
+            try {
+                sc.cancelSeats(toRelease);
+                seatClassRepo.save(sc);
+            } catch (Exception e) {
+                log.warn("홀드 반납 실패 return holdId={}: {}", hold.getId(), e.getMessage());
+            }
+        });
+        hold.setReleasedAt(LocalDateTime.now());
+        packageSeatHoldRepo.save(hold);
+    }
+
+    /**
+     * 상품별 cutoffDays 기준 "오늘 마감"인 출발에 대해, PAID 예약 인원이 minCapacity 미만이면
+     * 해당 출발의 모든 예약(PAID/RESERVED 등)을 기존 취소 플로우로 취소 (최소인원 미달로 출발 취소).
+     */
+    @Transactional
+    public void checkAndCancelDeparturesBelowMinCapacity() {
+        LocalDate today = LocalDate.now();
+        List<Product> products = productRepo.findByCutoffDaysIsNotNull();
+        for (Product product : products) {
+            if (product.getCutoffDays() == null) {
+                continue;
+            }
+            Tour tour = product.getTour();
+            if (tour == null || tour.getMinCapacity() == null) {
+                continue;
+            }
+            long minCapacity = tour.getMinCapacity();
+            LocalDate departDate = today.plusDays(product.getCutoffDays());
+            LocalDateTime start = departDate.atStartOfDay();
+            LocalDateTime end = departDate.plusDays(1).atStartOfDay();
+            List<PurchaseProduct> list = purchaseProductRepo.findByProductAndDepartDate(product, start, end);
+            long paidCount = list.stream()
+                .filter(pp -> pp.getPurchaseStatus() == PurchaseStatus.PAID)
+                .mapToLong(pp -> (pp.getAdultCount() != null ? pp.getAdultCount() : 0L) + (pp.getYouthCount() != null ? pp.getYouthCount() : 0L))
+                .sum();
+            if (paidCount < minCapacity) {
+                for (PurchaseProduct pp : list) {
+                    if (pp.getPurchaseStatus() != PurchaseStatus.CANCELLED) {
+                        try {
+                            cancelPurchase(pp.getId());
+                            log.info("최소인원 미달 취소: productId={}, departDate={}, purchaseProductId={}", product.getId(), departDate, pp.getId());
+                        } catch (Exception e) {
+                            log.warn("최소인원 미달 취소 실패 purchaseProductId={}: {}", pp.getId(), e.getMessage(), e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     @Transactional
     public void cancelPurchase(Long id) {
 
@@ -438,65 +860,132 @@ public class ProductServiceCommon {
         purchaseProduct.setWaiting(false);
         purchaseProductRepo.save(purchaseProduct);
 
+        // 패키지 홀드가 있으면 allocated만 감소 (좌석은 홀드 풀에 반환, SeatClass 복원 안 함)
+        Optional<PackageSeatHold> holdOpt = findPackageSeatHold(purchaseProduct);
+        PackageSeatHold cancelledHold = null; // 대기열 처리 시 같은 조합 필터·가용석 계산용
+        if (holdOpt.isPresent() && cancelledSeats > 0) {
+            PackageSeatHold hold = holdOpt.get();
+            hold.setAllocated((hold.getAllocated() != null ? hold.getAllocated() : 0L) - cancelledSeats);
+            if (hold.getAllocated() < 0) {
+                hold.setAllocated(0L);
+            }
+            packageSeatHoldRepo.save(hold);
+            cancelledHold = hold;
+        } else {
+            // 홀드 없음: 패키지 취소 시 출국/귀국 좌석 복원 (동일 인원 N만큼 각 구간에 반환)
+            List<ConfirmedSeatClass> finalSeatClasses = purchaseProduct.getFinalSeatClasses();
+            if (finalSeatClasses != null && !finalSeatClasses.isEmpty() && cancelledSeats > 0) {
+                for (ConfirmedSeatClass c : finalSeatClasses) {
+                if (c.getAirId() == null || c.getClassType() == null) {
+                    continue;
+                }
+                long n = (c.getSeatCountAdult() != null ? c.getSeatCountAdult() : 0L)
+                        + (c.getSeatCountYouth() != null ? c.getSeatCountYouth() : 0L);
+                if (n <= 0) {
+                    continue;
+                }
+                seatClassRepo.findByAirIdAndClassType(c.getAirId(), c.getClassType())
+                        .ifPresent(seatClass -> {
+                            try {
+                                seatClass.cancelSeats(n);
+                                seatClassRepo.save(seatClass);
+                            } catch (Exception e) {
+                                log.warn("좌석 복원 실패 airId={} classType={}: {}", c.getAirId(), c.getClassType(), e.getMessage());
+                            }
+                        });
+                }
+            }
+        }
+
         // 취소된 좌석이 없으면 대기 예약 처리 불필요
         if (cancelledSeats == 0) {
             return;
         }
 
-        // 취소된 예약의 출발 날짜 범위로 조회
         LocalDate cancelDepartDate = purchaseProduct.getDepartDateTime().toLocalDate();
         LocalDateTime cancelDepartDateStart = cancelDepartDate.atStartOfDay();
         LocalDateTime cancelDepartDateEnd = cancelDepartDate.plusDays(1).atStartOfDay();
-        
+
         List<PurchaseProduct> candidate = purchaseProductRepo
                 .findByProductAndDepartDate(
                         purchaseProduct.getProduct(),
                         cancelDepartDateStart,
                         cancelDepartDateEnd);
 
-        Product product = productRepo.findById(purchaseProduct.getProduct().getId()).get();
-        Product calcedProduct = calcSingleProduct(product, purchaseProduct.getDepartDateTime().toLocalDate());
+        // 같은 항공 조합(같은 홀드) 대기자만 순서대로 확정. 홀드가 있으면 해당 홀드 가용석만 사용.
+        Long availableSeats;
+        List<PurchaseProduct> toProcess;
+        if (cancelledHold != null) {
+            availableSeats = (cancelledHold.getTotalHeld() != null ? cancelledHold.getTotalHeld() : 0L)
+                    - (cancelledHold.getAllocated() != null ? cancelledHold.getAllocated() : 0L);
+            Long outId = cancelledHold.getOutboundSeatClassId();
+            Long retId = cancelledHold.getReturnSeatClassId();
+            toProcess = candidate.stream()
+                    .filter(pp -> pp.getPurchaseStatus() != PurchaseStatus.CANCELLED && pp.isWaiting())
+                    .filter(pp -> sameHoldCombo(pp, purchaseProduct.getProduct().getId(), cancelDepartDate, outId, retId))
+                    .sorted((a, b) -> {
+                        if (a.getPurchaseDate() == null && b.getPurchaseDate() == null) return 0;
+                        if (a.getPurchaseDate() == null) return 1;
+                        if (b.getPurchaseDate() == null) return -1;
+                        return a.getPurchaseDate().compareTo(b.getPurchaseDate());
+                    })
+                    .toList();
+        } else {
+            // 홀드 없음(레거시): 동일 (product, departDate) 전체 기준으로 가용석 계산 후 대기열 처리
+            Product product = productRepo.findById(purchaseProduct.getProduct().getId()).get();
+            Product calcedProduct = calcSingleProduct(product, purchaseProduct.getDepartDateTime().toLocalDate());
+            availableSeats = calcedProduct.getAvailableSeats() + cancelledSeats;
+            toProcess = candidate.stream()
+                    .filter(pp -> pp.getPurchaseStatus() != PurchaseStatus.CANCELLED && pp.isWaiting())
+                    .sorted((a, b) -> {
+                        if (a.getPurchaseDate() == null && b.getPurchaseDate() == null) return 0;
+                        if (a.getPurchaseDate() == null) return 1;
+                        if (b.getPurchaseDate() == null) return -1;
+                        return a.getPurchaseDate().compareTo(b.getPurchaseDate());
+                    })
+                    .toList();
+        }
 
-        // 취소된 좌석을 반환
-        Long availableSeats = calcedProduct.getAvailableSeats() + cancelledSeats;
+        for (PurchaseProduct candidatePP : toProcess) {
+            Long totalRequiredSeats = (candidatePP.getAdultCount() != null ? candidatePP.getAdultCount() : 0L)
+                    + (candidatePP.getYouthCount() != null ? candidatePP.getYouthCount() : 0L);
+            if (totalRequiredSeats <= availableSeats) {
+                availableSeats -= totalRequiredSeats;
+                candidatePP.setWaiting(false);
+                purchaseProductRepo.save(candidatePP);
 
-        // 대기 중인 예약들을 순서대로 처리 (purchaseDate 순서대로 정렬 - 먼저 생성된 순서)
-        candidate.sort((a, b) -> {
-            if (a.getPurchaseDate() == null && b.getPurchaseDate() == null) return 0;
-            if (a.getPurchaseDate() == null) return 1;
-            if (b.getPurchaseDate() == null) return -1;
-            return a.getPurchaseDate().compareTo(b.getPurchaseDate());
-        });
-
-        for (PurchaseProduct candidatePP : candidate) {
-            Long totalRequiredSeats = candidatePP.getAdultCount() + candidatePP.getYouthCount();
-            if (candidatePP.isWaiting() && candidatePP.getPurchaseStatus() != PurchaseStatus.CANCELLED) {
-                if (totalRequiredSeats <= availableSeats) {
-                    // 대기 예약을 확정 예약으로 변경
-                    availableSeats -= totalRequiredSeats;
-                    candidatePP.setWaiting(false);
-                    purchaseProductRepo.save(candidatePP);
-
-                    // candidatePP 해당 사용자 알람 보내기
-                    if (candidatePP.getWaiterEmail() != null) {
-                        emailService.sendWaitMail(candidatePP.getWaiterEmail(), candidatePP.getTitle());
-                    } else if (candidatePP.getWaiterNumber() != null) {
-                        System.out.println("=============== [TEST] 문자로 알림 보내는 기능 대체 ===================");
-                        System.out.println("전화번호 : " + candidatePP.getWaiterNumber());
-                        System.out.println("타이틀 : " + candidatePP.getTitle());
-                        System.out.println("=============== [TEST] 문자로 알림 보내는 기능 대체 ===================");
-                    }
-                } else {
-                    break; // 순번 건너뛰기 방지
+                if (candidatePP.getWaiterEmail() != null) {
+                    emailService.sendWaitMail(candidatePP.getWaiterEmail(), candidatePP.getTitle());
+                } else if (candidatePP.getWaiterNumber() != null) {
+                    log.info("예약대기 확정 알림(문자) 대상: purchaseId={}, number={}", candidatePP.getId(), candidatePP.getWaiterNumber());
                 }
+            } else {
+                break;
             }
         }
 
-        // 최종 잔여 좌석 수를 상품에 반영
-        calcedProduct.setAvailableSeats(availableSeats);
-        calcedProduct.UpdateProductStatus();
-        productRepo.save(calcedProduct);
+        // 홀드 없을 때만 Product 엔티티 가용석·상태 갱신 (홀드 있을 때는 홀드 단위로만 관리)
+        if (cancelledHold == null) {
+            Product product = productRepo.findById(purchaseProduct.getProduct().getId()).get();
+            Product calcedProduct = calcSingleProduct(product, purchaseProduct.getDepartDateTime().toLocalDate());
+            calcedProduct.setAvailableSeats(availableSeats);
+            calcedProduct.UpdateProductStatus();
+            productRepo.save(calcedProduct);
+        }
 
         return;
+    }
+
+    /** 동일 (productId, departDate, outboundSeatClassId, returnSeatClassId) 조합인지 여부 */
+    private boolean sameHoldCombo(PurchaseProduct pp, Long productId, LocalDate departDate, Long outboundSeatClassId, Long returnSeatClassId) {
+        Optional<PackageSeatHold> opt = findPackageSeatHold(pp);
+        if (opt.isEmpty()) {
+            return false;
+        }
+        PackageSeatHold h = opt.get();
+        return Objects.equals(h.getProductId(), productId)
+                && Objects.equals(h.getDepartDate(), departDate)
+                && Objects.equals(h.getOutboundSeatClassId(), outboundSeatClassId)
+                && Objects.equals(h.getReturnSeatClassId(), returnSeatClassId);
     }
 }
